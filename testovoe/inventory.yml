@@ -1,0 +1,1 @@
+_HOST_2 ansible_host=185.22.60.113 ansible+connection=ssh ansible_user=root ansible_become_pass=Pavlukov1.

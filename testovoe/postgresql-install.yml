@@ -1,0 +1,145 @@
+---
+- name: Install PostgreSQL
+  hosts: _HOST_2
+  vars_files:
+    - variables.yml
+  gather_facts: true
+  become: true
+  tasks:
+
+# Установим PostgreSQL последней версии:
+
+    - name: Add pgdg repo to sources.list.d
+      lineinfile:
+        path: /etc/apt/sources.list.d/pgdg.list
+        line: "deb http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        create: true
+
+    - name: Download PostgreSQL key and add it to system keyring
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install PostgreSQL
+      apt:
+        name: postgresql
+        state: present
+
+# Установим пакет python3-psycopg2 для работы с БД:
+
+    - name: Install PostgreSQL Ansible support packages
+      apt:
+        name: python3-psycopg2
+        state: latest
+
+# Создадим пользователя, БД, таблицу; Заполнил таблицу данными;
+
+    - name: Add produser account to database
+      postgresql_user:
+        name: "{{ user_name }}"
+        password: "{{ user_password }}"
+        role_attr_flags: LOGIN,CREATEDB
+        state: present
+      become_user: postgres
+
+    - name: Create production database
+      postgresql_db:
+        name: "{{ db_name }}"
+        login_user: "{{ user_name }}"
+        login_password: "{{ user_password }}"
+        state: present
+      become_user: postgres
+
+    - name: Grant produser access to the production database over the local network
+      postgresql_pg_hba:
+        dest: /etc/postgresql/16/main/pg_hba.conf
+        contype: host
+        users: "{{ user_name }}"
+        source: _HOST_2
+        databases: "{{ db_name }}"
+        method: md5
+
+    - name: Ensure PostgreSQL is listening for remote connections
+      lineinfile:
+        dest: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^listen_addresses ='
+        line: listen_addresses = '*'
+
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted
+
+    - name: Create table
+      community.postgresql.postgresql_table:
+        db: "{{ db_name }}"
+        name: users
+        columns:
+        - name text
+        - email text
+
+    - name: Insert data into the table
+      community.general.postgresql_query:
+        db: testovoe
+        query: INSERT INTO users (name, email) VALUES ('user1', 'user1@example.com'), ('user2', 'user2@example.com'), ('user3', 'user3@example.com')
+
+# Для открытия портов будем использовать модуль firewalld, установим его и откроем порты:
+
+    - name: Install firewalld
+      apt:
+        name: firewalld
+        state: present
+
+    - name: Start firewalld service
+      service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Open port 22 in firewalld
+      firewalld:
+        port: 22/tcp
+        permanent: true
+        state: enabled
+        immediate: true
+
+    - name: Open port 5432 in firewalld
+      firewalld:
+        port: 5432/tcp
+        permanent: true
+        state: enabled
+        immediate: true
+
+    - name: Reload firewalld
+      command: firewall-cmd --reload
+
+# Для того, чтобы сделать backup базы данных, создадим директорию, куда будут сохраняться копии:
+
+    - name: Create directory
+      file:
+        path: /home/master/backup
+        state: directory
+
+# Делаем backup; В название копии добавляем текущую дату:
+
+    - name: Run PostgreSQL backup
+      shell: |
+        pg_dump -U master -Fc testovoe > /home/master/backup/db_backup_{{ lookup('pipe', 'date +%d.%m.%Y') }}.sql
+
+# Поиск резервной копии делаем при помощи модуля ansible.builtin.find и выводим полученный результат (сколько совпадений получили):
+
+    - name: Find backup
+      ansible.builtin.find:
+        paths: /home/master/backup
+        patterns: "db_backup_{{ lookup('pipe', 'date +%d.%m.%Y') }}.sql"
+        file_type: file
+        recurse: yes
+      register: result
+
+    - name: Print result
+      debug:
+        msg: "Files found: {{ result.matched }}"
